@@ -9,14 +9,33 @@ from assistant.agent.ollama_client import (
     OllamaClient,
     OllamaUnreachableError,
 )
-from assistant.agent.tools import TOOL_SCHEMAS, ToolResult, dispatch_tool
+from assistant.agent.tools import (
+    TOOL_SCHEMAS,
+    WEB_SEARCH_TOOL_NAME,
+    ToolResult,
+    dispatch_tool,
+    dispatch_web_search,
+)
 from assistant.db.repository import ConversationEntry, Repository
+from assistant.search.searxng_client import SearxngUnreachableError
 
 SYSTEM_PROMPT: str = (
     "You are SAGE, a local task assistant. Use the provided tools to manage the user's tasks "
     "and knowledge. Categories are office, personal, side-hustle, shopping, learning. Priorities "
     "are low, medium, high. Dates use ISO format YYYY-MM-DD. Keep replies short and concrete. "
-    "To delete a task, call delete_task; deletion is confirmed by the user, never assume it happened."
+    "To delete a task, call delete_task; deletion is confirmed by the user, never assume it happened. "
+    "For anything current or time-sensitive, call web_search and answer only from the fetched "
+    "sources, never from your own training knowledge. If the user asks you to remember or note "
+    "what you find, follow the web_search with an add_knowledge call summarizing the key points "
+    "and their source URLs."
+)
+
+WEB_SEARCH_INSTRUCTION: str = (
+    "Answer using only the web_search sources above. Attribute every specific claim to a source "
+    "URL and its date, and if a source has no date say the date is unknown for it. If two sources "
+    "disagree, say so instead of silently choosing one. Clearly label anything you infer or that "
+    "the fetched text does not directly support as speculation, not fact. If the sources do not "
+    "actually answer the question, say so plainly rather than filling the gap from memory."
 )
 
 
@@ -124,7 +143,17 @@ class AgentLoop:
             except json.JSONDecodeError:
                 yield ErrorEvent(f"The model sent invalid arguments for {name!r}.")
                 return
-            result: ToolResult = dispatch_tool(self._repository, name, arguments)
+            if name == WEB_SEARCH_TOOL_NAME:
+                try:
+                    result: ToolResult = await dispatch_web_search(
+                        arguments.get("query", ""),
+                        int(arguments.get("max_results", 4)),
+                    )
+                except SearxngUnreachableError:
+                    yield ErrorEvent("Web search isn't available right now.")
+                    return
+            else:
+                result = dispatch_tool(self._repository, name, arguments)
             if result.refresh:
                 yield RefreshEvent()
             if result.pending_delete_task_id is not None:
@@ -136,6 +165,8 @@ class AgentLoop:
                     tool_name=result.name,
                 )
             )
+            if name == WEB_SEARCH_TOOL_NAME:
+                messages.append(ChatMessage(role="system", content=WEB_SEARCH_INSTRUCTION))
 
         final_holder: list[ChatCompleted] = []
         try:

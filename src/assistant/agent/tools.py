@@ -1,7 +1,14 @@
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from assistant.db.repository import Repository, Task
+from assistant.search.extract import ExtractedPage, fetch_and_extract
+from assistant.search.searxng_client import SearchResult, SearxngClient
+
+MAX_SOURCES: int = 5
+MIN_SOURCES: int = 1
+DEFAULT_SOURCES: int = 4
 
 ToolSchema = dict[str, Any]
 
@@ -111,7 +118,28 @@ TOOL_SCHEMAS: list[ToolSchema] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the live web via the local SearxNG instance and read the top pages. "
+                "Use this for anything current or time-sensitive; do not answer such questions "
+                "from memory."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
+
+WEB_SEARCH_TOOL_NAME: str = "web_search"
 
 
 def _task_to_dict(task: Task) -> dict[str, Any]:
@@ -186,6 +214,51 @@ def _dispatch_search_knowledge(repository: Repository, arguments: dict[str, Any]
                 {"id": item.id, "title": item.title, "content": item.content}
                 for item in results
             ]
+        },
+    )
+
+
+def _source_block(result: SearchResult, page: Optional[ExtractedPage]) -> dict[str, Any]:
+    if page is not None and page.text.strip():
+        return {
+            "title": page.title or result.title,
+            "url": result.url,
+            "date": page.date or result.published_date or "date unknown",
+            "extract": page.text,
+            "full_text": True,
+        }
+    return {
+        "title": result.title,
+        "url": result.url,
+        "date": result.published_date or "date unknown",
+        "extract": result.snippet,
+        "full_text": False,
+    }
+
+
+async def dispatch_web_search(
+    query: str,
+    max_results: int = DEFAULT_SOURCES,
+    client: Optional[SearxngClient] = None,
+) -> ToolResult:
+    capped: int = max(MIN_SOURCES, min(MAX_SOURCES, max_results))
+    search_client: SearxngClient = client if client is not None else SearxngClient()
+    results: list[SearchResult] = await search_client.search(query, limit=capped)
+    top: list[SearchResult] = results[:capped]
+    pages: list[Optional[ExtractedPage]] = list(
+        await asyncio.gather(*[fetch_and_extract(result.url) for result in top])
+    )
+    sources: list[dict[str, Any]] = [
+        _source_block(result, page) for result, page in zip(top, pages)
+    ]
+    fetched_full_text: int = sum(1 for source in sources if source["full_text"])
+    return ToolResult(
+        WEB_SEARCH_TOOL_NAME,
+        {
+            "query": query,
+            "sources": sources,
+            "found": len(top),
+            "fetched_full_text": fetched_full_text,
         },
     )
 

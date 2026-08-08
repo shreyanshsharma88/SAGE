@@ -11,6 +11,9 @@ data/
 *.db-wal
 .env
 
+searxng/*
+!searxng/settings.yml
+
 
 .claude
 claude*

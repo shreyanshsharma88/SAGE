@@ -20,7 +20,7 @@ class Config:
         return cls(
             model=os.environ.get("SAGE_MODEL", DEFAULT_MODEL),
             ollama_url=os.environ.get("SAGE_OLLAMA_URL", "http://localhost:11434"),
-            searxng_url=os.environ.get("SAGE_SEARXNG_URL", "http://localhost:8888"),
+            searxng_url=os.environ.get("SAGE_SEARXNG_URL", "http://localhost:8080"),
             db_path=Path(db_path_raw),
         )
 

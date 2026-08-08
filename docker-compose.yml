@@ -4,14 +4,16 @@ services:
     container_name: sage-searxng
     restart: unless-stopped
     ports:
-      - "8888:8080"
+      - "8080:8080"
     volumes:
       - ./searxng:/etc/searxng:rw
     environment:
-      - SEARXNG_BASE_URL=http://localhost:8888/
+      - SEARXNG_BASE_URL=http://localhost:8080/
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-please-change-this-sage-searxng-secret}
     cap_drop:
       - ALL
     cap_add:
       - CHOWN
       - SETGID
       - SETUID
+      - DAC_OVERRIDE
