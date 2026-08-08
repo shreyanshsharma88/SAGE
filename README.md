@@ -27,12 +27,6 @@ python -m assistant.main
 - `d` — delete the selected task (asks for confirmation first)
 - `enter` in the input bar — add a task to the active category
 
-## Hardware target
-
-Ubuntu 26.04, AMD Ryzen 5 5600H, NVIDIA GTX 1650 Mobile (4GB VRAM). The 4GB VRAM ceiling
-means the LLM must be a 3–4B model resident fully on-GPU; the default is `phi4-mini`. The
-model name is configurable in `src/assistant/config.py` (or the `SAGE_MODEL` env var).
-
 ## Configuration
 
 All runtime configuration lives in `src/assistant/config.py`, overridable via environment
