@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.ruff_cache/
+data/
+!data/.gitkeep
+*.db
+*.db-shm
+*.db-wal
+.env
+
+
+.claude
+claude*
+CLAUDE.md
