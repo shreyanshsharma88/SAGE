@@ -25,10 +25,15 @@ from assistant.agent.loop import (
     PendingDeleteEvent,
     RefreshEvent,
 )
-from assistant.db.repository import Category, Repository, Task
+from assistant.db.repository import Category, Knowledge, Repository, Task
+from assistant.tui.widgets.note_item import NoteItem
 from assistant.tui.widgets.task_item import TaskItem
 
 CATEGORIES: tuple[Category, ...] = ("office", "personal", "side-hustle", "shopping", "learning")
+NOTES_PANE_ID: str = "pane_notes"
+NOTES_LIST_ID: str = "notes_list"
+NOTES_SEARCH_ID: str = "notes-search"
+TASK_INPUT_ID: str = "task-input"
 
 
 def category_to_pane_id(category: Category) -> str:
@@ -71,12 +76,16 @@ class TaskListScreen(Screen[None]):
             for category in CATEGORIES:
                 with TabPane(category, id=category_to_pane_id(category)):
                     yield ListView(id=category_to_list_id(category))
+            with TabPane("Notes", id=NOTES_PANE_ID):
+                yield Input(placeholder="Search notes…", id=NOTES_SEARCH_ID)
+                yield ListView(id=NOTES_LIST_ID)
         yield Static("", id="agent-output")
-        yield Input(placeholder="Ask SAGE anything, then press enter", id="task-input")
+        yield Input(placeholder="Ask SAGE anything, then press enter", id=TASK_INPUT_ID)
         yield Footer()
 
     def on_mount(self) -> None:
         self._refresh_all()
+        self._refresh_notes("")
 
     def _active_category(self) -> Category:
         tabs: TabbedContent = self.query_one(TabbedContent)
@@ -105,7 +114,30 @@ class TaskListScreen(Screen[None]):
             return highlighted
         return None
 
+    def _refresh_notes(self, query: str) -> None:
+        list_view: ListView = self.query_one(f"#{NOTES_LIST_ID}", ListView)
+        list_view.clear()
+        notes: list[Knowledge] = self._notes_for_query(query)
+        for note in notes:
+            list_view.append(NoteItem(note))
+
+    def _notes_for_query(self, query: str) -> list[Knowledge]:
+        tokens: list[str] = [token for token in query.split() if token.isalnum()]
+        if not tokens:
+            return self._repository.list_knowledge()
+        fts_query: str = " ".join(f"{token}*" for token in tokens)
+        try:
+            return self._repository.search_knowledge(fts_query)
+        except Exception:
+            return []
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == NOTES_SEARCH_ID:
+            self._refresh_notes(event.value)
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != TASK_INPUT_ID:
+            return
         message: str = event.value.strip()
         if not message:
             return

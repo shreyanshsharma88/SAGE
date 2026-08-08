@@ -1,9 +1,27 @@
 import sqlite3
 from pathlib import Path
+from typing import Callable
 
 from assistant.config import get_config
 
 SCHEMA_PATH: Path = Path(__file__).resolve().parent / "schema.sql"
+
+MigrationStep = Callable[[sqlite3.Connection], None]
+
+
+def _column_exists(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    rows: list[tuple[object, ...]] = connection.execute(
+        f"PRAGMA table_info({table})"
+    ).fetchall()
+    return any(row[1] == column for row in rows)
+
+
+def _add_reminded_at(connection: sqlite3.Connection) -> None:
+    if not _column_exists(connection, "tasks", "reminded_at"):
+        connection.execute("ALTER TABLE tasks ADD COLUMN reminded_at TEXT")
+
+
+MIGRATION_STEPS: list[MigrationStep] = [_add_reminded_at]
 
 
 def apply_schema(db_path: Path) -> None:
@@ -12,6 +30,8 @@ def apply_schema(db_path: Path) -> None:
     connection: sqlite3.Connection = sqlite3.connect(db_path)
     try:
         connection.executescript(schema_sql)
+        for step in MIGRATION_STEPS:
+            step(connection)
         connection.commit()
     finally:
         connection.close()

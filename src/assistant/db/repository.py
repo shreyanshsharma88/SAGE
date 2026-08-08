@@ -1,10 +1,12 @@
 import sqlite3
 from dataclasses import dataclass
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Literal, Optional
 
 from assistant.config import get_config
 from assistant.db.migrations import apply_schema
+from assistant.db.recurrence import next_occurrence
 
 Category = Literal["office", "personal", "side-hustle", "shopping", "learning"]
 Priority = Literal["low", "medium", "high"]
@@ -23,6 +25,7 @@ class Task:
     recurrence_rule: Optional[str]
     status: Status
     reminder_at: Optional[str]
+    reminded_at: Optional[str]
     created_at: str
     completed_at: Optional[str]
 
@@ -57,6 +60,7 @@ def _task_from_row(row: sqlite3.Row) -> Task:
         recurrence_rule=row["recurrence_rule"],
         status=row["status"],
         reminder_at=row["reminder_at"],
+        reminded_at=row["reminded_at"],
         created_at=row["created_at"],
         completed_at=row["completed_at"],
     )
@@ -178,7 +182,35 @@ class Repository:
             (task_id,),
         )
         self._connection.commit()
-        return self.get_task(task_id)
+        completed: Task = self.get_task(task_id)
+        if completed.recurrence_rule and completed.due_date:
+            self._regenerate_recurring(completed)
+        return completed
+
+    def _regenerate_recurring(self, task: Task) -> Task:
+        rule: str = task.recurrence_rule or ""
+        due_date: str = task.due_date or ""
+        next_due: date = next_occurrence(due_date, rule)
+        next_reminder_at: Optional[str] = self._shifted_reminder(task, next_due)
+        return self.add_task(
+            category=task.category,
+            title=task.title,
+            notes=task.notes,
+            priority=task.priority,
+            due_date=next_due.isoformat(),
+            recurrence_rule=task.recurrence_rule,
+            reminder_at=next_reminder_at,
+        )
+
+    @staticmethod
+    def _shifted_reminder(task: Task, next_due: date) -> Optional[str]:
+        if not task.reminder_at or not task.due_date:
+            return None
+        original_due: datetime = datetime.combine(date.fromisoformat(task.due_date), time.min)
+        original_reminder: datetime = datetime.fromisoformat(task.reminder_at)
+        offset = original_due - original_reminder
+        new_due: datetime = datetime.combine(next_due, time.min)
+        return (new_due - offset).isoformat(sep=" ")
 
     def delete_task(self, task_id: int) -> None:
         self._connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
@@ -209,6 +241,26 @@ class Repository:
         if row is None:
             raise KeyError(f"knowledge not found after insert: {new_id}")
         return _knowledge_from_row(row)
+
+    def list_knowledge(self, limit: int = 50) -> list[Knowledge]:
+        rows: list[sqlite3.Row] = self._connection.execute(
+            "SELECT * FROM knowledge ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [_knowledge_from_row(row) for row in rows]
+
+    def due_reminders(self) -> list[Task]:
+        rows: list[sqlite3.Row] = self._connection.execute(
+            "SELECT * FROM tasks WHERE reminder_at IS NOT NULL "
+            "AND reminder_at <= datetime('now') AND reminded_at IS NULL AND status = 'open' "
+            "ORDER BY reminder_at"
+        ).fetchall()
+        return [_task_from_row(row) for row in rows]
+
+    def mark_reminded(self, task_id: int) -> None:
+        self._connection.execute(
+            "UPDATE tasks SET reminded_at = datetime('now') WHERE id = ?", (task_id,)
+        )
+        self._connection.commit()
 
     def search_knowledge(self, query: str, limit: int = 20) -> list[Knowledge]:
         rows: list[sqlite3.Row] = self._connection.execute(
