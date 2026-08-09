@@ -1,3 +1,4 @@
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Optional, Union
@@ -28,6 +29,7 @@ class ChatChunk:
 class ChatCompleted:
     content: str
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    cancelled: bool = False
 
 
 ChatEvent = Union[ChatChunk, ChatCompleted]
@@ -53,6 +55,7 @@ class OllamaClient:
         self,
         messages: list[ChatMessage],
         tools: Optional[list[dict[str, Any]]] = None,
+        cancel_event: Optional[asyncio.Event] = None,
     ) -> AsyncIterator[ChatEvent]:
         payload: dict[str, Any] = {
             "model": self._model,
@@ -63,6 +66,7 @@ class OllamaClient:
             payload["tools"] = tools
         content_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
+        cancelled: bool = False
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 async with client.stream(
@@ -70,6 +74,9 @@ class OllamaClient:
                 ) as response:
                     response.raise_for_status()
                     async for line in response.aiter_lines():
+                        if cancel_event is not None and cancel_event.is_set():
+                            cancelled = True
+                            break
                         stripped: str = line.strip()
                         if not stripped:
                             continue
@@ -91,7 +98,7 @@ class OllamaClient:
             raise OllamaUnreachableError(
                 f"Ollama returned an error status: {exc.response.status_code}"
             ) from exc
-        yield ChatCompleted(content="".join(content_parts), tool_calls=tool_calls)
+        yield ChatCompleted(content="".join(content_parts), tool_calls=tool_calls, cancelled=cancelled)
 
     async def is_available(self) -> bool:
         try:

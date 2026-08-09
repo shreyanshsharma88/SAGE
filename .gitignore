@@ -14,6 +14,8 @@ data/
 searxng/*
 !searxng/settings.yml
 
+models/
+
 
 .claude
 claude*

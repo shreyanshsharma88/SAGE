@@ -1,0 +1,12 @@
+[Unit]
+Description=jarvis-assistant background reminder daemon
+After=default.target
+
+[Service]
+ExecStart=%h/sage/.venv/bin/python -m assistant.daemon
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=%h/sage
+
+[Install]
+WantedBy=default.target

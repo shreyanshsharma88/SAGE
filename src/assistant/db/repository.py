@@ -85,6 +85,14 @@ class Repository:
         self._connection: sqlite3.Connection = sqlite3.connect(self._db_path)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
+        self._enable_wal()
+
+    def _enable_wal(self) -> None:
+        current_mode: str = str(
+            self._connection.execute("PRAGMA journal_mode").fetchone()[0]
+        ).lower()
+        if current_mode != "wal":
+            self._connection.execute("PRAGMA journal_mode=WAL")
 
     def close(self) -> None:
         self._connection.close()
@@ -261,6 +269,15 @@ class Repository:
             "UPDATE tasks SET reminded_at = datetime('now') WHERE id = ?", (task_id,)
         )
         self._connection.commit()
+
+    def claim_reminder(self, task_id: int) -> bool:
+        cursor: sqlite3.Cursor = self._connection.execute(
+            "UPDATE tasks SET reminded_at = datetime('now') "
+            "WHERE id = ? AND reminded_at IS NULL",
+            (task_id,),
+        )
+        self._connection.commit()
+        return cursor.rowcount == 1
 
     def search_knowledge(self, query: str, limit: int = 20) -> list[Knowledge]:
         rows: list[sqlite3.Row] = self._connection.execute(

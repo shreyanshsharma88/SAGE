@@ -1,0 +1,12 @@
+[Unit]
+Description=jarvis-assistant always-listening voice service
+After=default.target
+
+[Service]
+ExecStart=%h/sage/.venv/bin/python -m assistant.voice
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=%h/sage
+
+[Install]
+WantedBy=default.target

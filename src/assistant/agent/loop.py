@@ -1,6 +1,7 @@
+import asyncio
 import json
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Optional, Union
+from typing import Any, AsyncIterator, Callable, Optional, Protocol, Union
 
 from assistant.agent.ollama_client import (
     ChatChunk,
@@ -65,6 +66,49 @@ class ErrorEvent:
 
 
 LoopEvent = Union[ChunkEvent, RefreshEvent, PendingDeleteEvent, DoneEvent, ErrorEvent]
+
+SENTENCE_BOUNDARIES: str = ".!?\n"
+
+
+class SentenceSink(Protocol):
+    def enqueue_sentence(self, text: str) -> None: ...
+
+
+class SentenceBuffer:
+    def __init__(self) -> None:
+        self._buffer: str = ""
+
+    def add(self, text: str) -> list[str]:
+        self._buffer += text
+        sentences: list[str] = []
+        while True:
+            boundary: Optional[int] = self._first_boundary(self._buffer)
+            if boundary is None:
+                break
+            sentence: str = self._buffer[: boundary + 1].strip()
+            self._buffer = self._buffer[boundary + 1 :]
+            if sentence:
+                sentences.append(sentence)
+        return sentences
+
+    def flush(self) -> Optional[str]:
+        remaining: str = self._buffer.strip()
+        self._buffer = ""
+        return remaining or None
+
+    @staticmethod
+    def _first_boundary(text: str) -> Optional[int]:
+        positions: list[int] = [text.find(char) for char in SENTENCE_BOUNDARIES]
+        found: list[int] = [position for position in positions if position >= 0]
+        return min(found) if found else None
+
+
+@dataclass(frozen=True)
+class VoiceTurnResult:
+    reply: str
+    pending_delete_task_id: Optional[int]
+    cancelled: bool
+    error: Optional[str]
 
 
 class AgentLoop:
@@ -179,3 +223,116 @@ class AgentLoop:
         final_reply: str = final_holder[-1].content if final_holder else ""
         self._repository.log_conversation("assistant", final_reply)
         yield DoneEvent(final_reply)
+
+    async def _pump_voice(
+        self,
+        messages: list[ChatMessage],
+        tools: Optional[list[dict[str, Any]]],
+        cancel_event: asyncio.Event,
+        emit: Callable[[str], None],
+    ) -> ChatCompleted:
+        completed: Optional[ChatCompleted] = None
+        async for event in self._client.chat(messages, tools=tools, cancel_event=cancel_event):
+            if isinstance(event, ChatChunk):
+                emit(event.text)
+            elif isinstance(event, ChatCompleted):
+                completed = event
+        return completed if completed is not None else ChatCompleted("", [], False)
+
+    async def _dispatch_calls_voice(
+        self,
+        messages: list[ChatMessage],
+        tool_calls: list[dict[str, Any]],
+    ) -> tuple[Optional[int], Optional[str]]:
+        pending_delete: Optional[int] = None
+        for call in tool_calls:
+            function: dict[str, Any] = call.get("function") or {}
+            name: str = function.get("name", "")
+            try:
+                arguments: dict[str, Any] = self._parse_arguments(function.get("arguments"))
+            except json.JSONDecodeError:
+                return pending_delete, f"The model sent invalid arguments for {name!r}."
+            if name == WEB_SEARCH_TOOL_NAME:
+                try:
+                    result: ToolResult = await dispatch_web_search(
+                        arguments.get("query", ""),
+                        int(arguments.get("max_results", 4)),
+                    )
+                except SearxngUnreachableError:
+                    return pending_delete, "Web search isn't available right now."
+            else:
+                result = dispatch_tool(self._repository, name, arguments)
+            if result.pending_delete_task_id is not None:
+                pending_delete = result.pending_delete_task_id
+            messages.append(
+                ChatMessage(role="tool", content=json.dumps(result.content), tool_name=result.name)
+            )
+            if name == WEB_SEARCH_TOOL_NAME:
+                messages.append(ChatMessage(role="system", content=WEB_SEARCH_INSTRUCTION))
+        return pending_delete, None
+
+    async def run_voice(
+        self,
+        user_message: str,
+        tts: SentenceSink,
+        cancel_event: asyncio.Event,
+    ) -> VoiceTurnResult:
+        self._repository.log_conversation("user", user_message)
+        messages: list[ChatMessage] = [ChatMessage(role="system", content=SYSTEM_PROMPT)]
+        messages.extend(self._load_history())
+        messages.append(ChatMessage(role="user", content=user_message))
+
+        buffer: SentenceBuffer = SentenceBuffer()
+        spoken: list[str] = []
+
+        def emit(text: str) -> None:
+            spoken.append(text)
+            for sentence in buffer.add(text):
+                tts.enqueue_sentence(sentence)
+
+        try:
+            first: ChatCompleted = await self._pump_voice(messages, TOOL_SCHEMAS, cancel_event, emit)
+        except OllamaUnreachableError as exc:
+            return VoiceTurnResult("".join(spoken), None, False, str(exc))
+
+        if first.cancelled:
+            reply: str = "".join(spoken)
+            self._repository.log_conversation("assistant", reply)
+            return VoiceTurnResult(reply, None, True, None)
+
+        if not first.tool_calls:
+            tail: Optional[str] = buffer.flush()
+            if tail is not None:
+                tts.enqueue_sentence(tail)
+            reply = "".join(spoken)
+            self._repository.log_conversation("assistant", reply)
+            return VoiceTurnResult(reply, None, False, None)
+
+        messages.append(
+            ChatMessage(role="assistant", content=first.content, tool_calls=first.tool_calls)
+        )
+        pending_delete, error = await self._dispatch_calls_voice(messages, first.tool_calls)
+        if error is not None:
+            return VoiceTurnResult("".join(spoken), pending_delete, False, error)
+
+        second_buffer: SentenceBuffer = SentenceBuffer()
+        second_spoken: list[str] = []
+
+        def emit_second(text: str) -> None:
+            second_spoken.append(text)
+            for sentence in second_buffer.add(text):
+                tts.enqueue_sentence(sentence)
+
+        try:
+            second: ChatCompleted = await self._pump_voice(messages, None, cancel_event, emit_second)
+        except OllamaUnreachableError as exc:
+            return VoiceTurnResult("".join(second_spoken), pending_delete, False, str(exc))
+
+        if not second.cancelled:
+            tail = second_buffer.flush()
+            if tail is not None:
+                tts.enqueue_sentence(tail)
+
+        reply = "".join(second_spoken)
+        self._repository.log_conversation("assistant", reply)
+        return VoiceTurnResult(reply, pending_delete, second.cancelled, None)

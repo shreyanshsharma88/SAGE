@@ -1,10 +1,8 @@
 from textual.app import App
 
-from assistant.db.repository import Repository, Task
-from assistant.notify import notification_available, send_notification
+from assistant.db.repository import Repository
+from assistant.reminders import REMINDER_POLL_SECONDS, ReminderOutcome, check_and_fire_reminders
 from assistant.tui.screens.task_list import TaskListScreen
-
-REMINDER_POLL_SECONDS: float = 60.0
 
 
 class SageApp(App[None]):
@@ -64,19 +62,9 @@ class SageApp(App[None]):
         self.set_interval(REMINDER_POLL_SECONDS, self.check_reminders)
 
     def check_reminders(self) -> None:
-        due: list[Task] = self.repository.due_reminders()
-        if not due:
-            return
-        available: bool = notification_available()
-        warned: bool = False
-        for task in due:
-            if available:
-                due_label: str = task.due_date or "no due date"
-                send_notification("SAGE reminder", f"{task.title} (due {due_label})")
-            elif not warned:
-                self.notify(
-                    "notify-send not found; reminder popups are unavailable.",
-                    severity="warning",
-                )
-                warned = True
-            self.repository.mark_reminded(task.id)
+        outcome: ReminderOutcome = check_and_fire_reminders(self.repository)
+        if outcome.notify_unavailable:
+            self.notify(
+                "notify-send not found; reminder popups are unavailable.",
+                severity="warning",
+            )
